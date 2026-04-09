@@ -1,0 +1,804 @@
+{
+  "name": "deep-research-agent-fixed",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Deep Research Agent \u2014 Memory Constraints\n\n**Self-Defined Constraints (enforced in code)**\n- Session token budget: 10 000 tokens total\n- Per-call context cap: 2 000 chars (~500 tokens) of injected memory\n- Max sub-queries: 4\n- Rolling summary triggers at: \u2265 6 episodes\n- Compression model: gpt-4o-mini (cheap)\n- Research model: gpt-4o-mini\n\n**Memory Architecture \u2014 3 Layers**\n1. Window Buffer Memory \u2014 4-turn working buffer (built-in)\n2. Episodic Store \u2014 structured episode objects threaded through Code nodes\n3. Rolling Summary \u2014 LLM-compressed narrative, replaces episodes when count \u2265 3\n\n**Tools available to AI Agent**\n- web_search (DuckDuckGo, no API key required)\n- wikipedia (REST v1, no API key required)\n- calculator (safe eval)\n\n**How to activate**\n1. Add your OpenAI credential to the three HTTP Request nodes\n2. Click Activate in the top-right\n3. POST to the webhook URL with: { \"query\": \"...\", \"max_sub_queries\": 4 }",
+        "height": 420,
+        "width": 480,
+        "color": 5
+      },
+      "id": "e0cd9d83-3555-41d4-a09f-eb3e36e49556",
+      "name": "Constraints Documentation",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "research",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        32,
+        608
+      ],
+      "id": "a1e45a42-e2fe-480a-825e-a828514cab70",
+      "name": "Webhook",
+      "webhookId": "c7b79307-5add-4801-b863-5f97eb9f71cf"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# \u2500\u2500 INIT SESSION \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Runs once per request. Initialises all session state.\n# FIX: budget limit corrected to 10000 (was 2000 \u2014 too low, exhausted after 1st sub-query)\n\nbody = _items[0]['json'].get('body', _items[0]['json'])\nquery = body.get('query', '').strip()\nmax_sub_queries = int(body.get('max_sub_queries', 4))\n\nreturn [{\n  'json': {\n    'originalQuery': query,\n    'maxSubQueries': max_sub_queries,\n    'tokenBudget': {\n      'limit': 10000,\n      'consumed': 0,\n      'calls': []\n    },\n    'episodes': [],\n    'sources': [],\n    'rollingSummary': ''\n  }\n}]"
+      },
+      "id": "80b63882-a0ba-42a2-b8fe-cee6dd60ccff",
+      "name": "Init Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "id-1",
+              "leftValue": "={{ $json.originalQuery }}",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ac3a55f0-53d7-4069-8a9d-1b102a9a7cb3",
+      "name": "Check Query Valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"error\": \"Missing or empty query parameter\",\n  \"message\": \"Please provide a valid 'query' field in the request body\",\n  \"example\": {\n    \"query\": \"What is quantum computing?\",\n    \"max_sub_queries\": 3\n  }\n}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "192451e0-b43f-4b9f-a723-0a13b3bf47d3",
+      "name": "Return Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        704,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"max_tokens\": 400,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a research planning assistant. Break complex queries into atomic sub-questions. Return ONLY a JSON array of strings, no other text, no markdown fences.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Break this research query into at most {{ $json.maxSubQueries }} atomic sub-questions. Each must be independently answerable.\\n\\nQuery: {{ $json.originalQuery }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        704,
+        512
+      ],
+      "id": "5d07d19c-0fed-404b-9f1d-9d024f2e1e7b",
+      "name": "Decompose Query",
+      "credentials": {
+        "openAiApi": {
+          "id": "d05xXuXjh96jCN7e",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# \u2500\u2500 PARSE SUB-QUERIES \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Extracts the JSON array from the LLM response with 3-tier fallback.\n\n# Get HTTP response from Decompose Query (current node input)\nresponse = _items[0]['json']\nraw_text = response['choices'][0]['message']['content'].strip()\n\n# Strip markdown fences\ncleaned = raw_text.replace('```json', '').replace('```', '').strip()\n\nsub_queries = []\ntry:\n    if cleaned.startswith('[') and cleaned.endswith(']'):\n        sub_queries = json.loads(cleaned)\n    else:\n        raise ValueError(\"Not a JSON array\")\nexcept:\n    # Fallback: extract quoted strings >= 8 chars\n    in_quote = False\n    current = ''\n    for i, char in enumerate(cleaned):\n        if char == '\"' and (i == 0 or cleaned[i-1] != '\\\\'):\n            if in_quote:\n                if len(current) >= 8:\n                    sub_queries.append(current)\n                current = ''\n                in_quote = False\n            else:\n                in_quote = True\n        elif in_quote:\n            current += char\n\n# Get session state from Check Query Valid node\n# The Decompose Query node receives input from Check Query Valid\n# We need to access the original state that was passed through\nstate_item = _items[0]['json']\n\n# Extract session state fields that were passed from Check Query Valid\noriginal_query = state_item.get('originalQuery', '')\nmax_sub_queries = state_item.get('maxSubQueries', 4)\ntoken_budget = state_item.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\nepisodes = state_item.get('episodes', [])\nsources = state_item.get('sources', [])\nrolling_summary = state_item.get('rollingSummary', '')\n\n# Final fallback: use original query\nif not sub_queries:\n    sub_queries = [original_query]\n\n# Update token budget\nusage = response.get('usage', {})\nupdated_budget = {\n    'limit': token_budget.get('limit', 10000),\n    'consumed': token_budget.get('consumed', 0) + usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0),\n    'calls': token_budget.get('calls', []) + [{\n        'step': 'decompose_query',\n        'tokens': usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0)\n    }]\n}\n\nreturn [{'json': {\n    'loopDone': False,\n    'originalQuery': original_query,\n    'maxSubQueries': max_sub_queries,\n    'subQueries': sub_queries[:max_sub_queries],\n    'currentIndex': 0,\n    'tokenBudget': updated_budget,\n    'episodes': episodes,\n    'sources': sources,\n    'rollingSummary': rolling_summary\n}}]"
+      },
+      "id": "145a88c1-7a1d-4a96-9a53-8dc6a61beb48",
+      "name": "Parse Sub-queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cls-1",
+              "name": "currentSubQuery",
+              "value": "={{ $json.subQuery }}",
+              "type": "string"
+            },
+            {
+              "id": "cls-2",
+              "name": "index",
+              "value": "={{ $json.index }}",
+              "type": "number"
+            },
+            {
+              "id": "cls-3",
+              "name": "originalQuery",
+              "value": "={{ $json.originalQuery }}",
+              "type": "string"
+            },
+            {
+              "id": "cls-4",
+              "name": "totalQueries",
+              "value": "={{ $json.totalQueries }}",
+              "type": "number"
+            },
+            {
+              "id": "cls-5",
+              "name": "tokenBudget",
+              "value": "={{ $json.tokenBudget }}",
+              "type": "object"
+            },
+            {
+              "id": "cls-6",
+              "name": "sources",
+              "value": "={{ $json.sources }}",
+              "type": "array"
+            },
+            {
+              "id": "cls-7",
+              "name": "rollingSummary",
+              "value": "={{ $json.rollingSummary }}",
+              "type": "string"
+            },
+            {
+              "id": "cls-8",
+              "name": "maxSubQueries",
+              "value": "={{ $json.maxSubQueries }}",
+              "type": "number"
+            },
+            {
+              "id": "cls-9",
+              "name": "subQuery",
+              "value": "={{ $json.subQuery }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b898db0c-3c42-44e3-af1a-9d7cf7f8cf1e",
+      "name": "Capture Loop State",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1376,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a rigorous research assistant. Answer this sub-question using your tools.\nBe concise \u2014 cite sources inline.\n\nSub-question: {{ $json.currentSubQuery }}\n\n{% if $json.rollingSummary %}[Session Summary]\n{{ $json.rollingSummary }}\n\n{% endif %}",
+        "options": {
+          "systemMessage": "You are a research assistant with tool access. Use tools to gather facts, then write a concise answer (100-200 words) with citations. Stop using tools once you have sufficient evidence."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1792,
+        384
+      ],
+      "id": "3ec1de33-3bdc-422b-80fe-5a17a7790fa1",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1600,
+        608
+      ],
+      "id": "53301ced-e320-4d85-ba9d-9a1beda7803b",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "d05xXuXjh96jCN7e",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "research_session",
+        "contextWindowLength": 4
+      },
+      "id": "57631f75-30e3-47ac-a1ae-298ee6682d0e",
+      "name": "Window Buffer Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        1728,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Search the web for current facts, news, and research on any topic",
+        "url": "=https://api.duckduckgo.com/?q={{ encodeURIComponent($fromAI('query', 'the search query')) }}&format=json&no_html=1&skip_disambig=1",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1856,
+        608
+      ],
+      "id": "2cbd8430-f07c-4f39-9d11-acb10ee80f85",
+      "name": "web_search"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Get a Wikipedia article summary for a well-known topic, concept, person, or event",
+        "url": "=https://en.wikipedia.org/api/rest_v1/page/summary/{{ encodeURIComponent($fromAI('topic', 'the Wikipedia article title')) }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "{ \"User-Agent\": \"n8n-deep-research-agent/1.0\" }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        1984,
+        608
+      ],
+      "id": "29425f83-3c91-4afc-a6c3-99081103314c",
+      "name": "wikipedia"
+    },
+    {
+      "parameters": {
+        "description": "Evaluate a safe mathematical expression and return the numeric result",
+        "jsCode": "const expression = $fromAI('expression', 'the mathematical expression to evaluate');\ntry {\n  const clean = expression.replace(/Math\\./g, '');\n  if (/[a-zA-Z_$]/.test(clean)) {\n    return [{ json: { result: 'Error: only numeric expressions and Math functions allowed' } }];\n  }\n  const result = Function('\"use strict\"; const Math = globalThis.Math; return (' + expression + ')')();\n  return [{ json: { result: String(result) } }];\n} catch(e) {\n  return [{ json: { result: 'Error: ' + e.message } }];\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        2112,
+        608
+      ],
+      "id": "213944c7-af2c-4c08-a421-a29c21ed30c0",
+      "name": "calculator"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# \u2500\u2500 STORE EPISODE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# _items[0]['json'] is the merged item from Merge Agent Output:\n#   output         - AI Agent answer text\n#   subQuery       - the sub-question that was answered\n#   index          - 0-based position of this sub-query\n#   tokenBudget    - budget object for this item\n#   originalQuery  - the top-level user query\n#   maxSubQueries  - total planned sub-queries\n#   totalQueries   - same as maxSubQueries\n#   sources        - accumulated sources\n#   rollingSummary - Layer 3 summary if triggered\n\nitem         = _items[0]['json']\nagent_output = item.get('output', '(no answer)')\nindex        = item.get('index', 0)\nsub_query    = item.get('subQuery', item.get('currentSubQuery', ''))\ntoken_budget = item.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\n\nestimated_tokens = round(len(agent_output) / 4) + 200\nupdated_budget = {\n    'limit':    token_budget.get('limit', 10000),\n    'consumed': token_budget.get('consumed', 0) + estimated_tokens,\n    'calls':    token_budget.get('calls', []) + [{'step': 'sub_query_' + str(index + 1), 'tokens': estimated_tokens}]\n}\n\nreturn [{'json': {\n    'episodeId':     index + 1,\n    'index':         index,\n    'subQuery':      sub_query,\n    'answer':        agent_output,\n    'originalQuery': item.get('originalQuery', ''),\n    'maxSubQueries': item.get('maxSubQueries', 4),\n    'totalQueries':  item.get('totalQueries', 4),\n    'tokenBudget':   updated_budget,\n    'sources':       item.get('sources', []),\n    'rollingSummary':item.get('rollingSummary', '')\n}}]\n"
+      },
+      "id": "397f50d4-0f45-4cf3-bb4f-9691e415a9ed",
+      "name": "Store Episode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a senior research analyst.\n\nOriginal question: {{ $json.originalQuery }}\n\n{% if $json.rollingSummary %}[Session Summary]\n{{ $json.rollingSummary }}\n\n{% endif %}[Research Evidence]\n{{ $json.episodes.map(e => '[Ep' + e.id + '] Q: ' + e.query + '\\nA: ' + e.answer).join('\\n\\n') }}\n\nWrite a complete, well-structured answer to the original question citing [Ep1], [Ep2] etc. Be thorough and integrate all evidence.",
+        "options": {
+          "systemMessage": "You are a senior research analyst. Synthesise the research evidence into a coherent, well-cited final answer. Cite sub-answers as [Ep1], [Ep2], etc."
+        }
+      },
+      "id": "ba684269-259f-44fb-ae51-9d058a670b6f",
+      "name": "Synthesize Answer",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        3550,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# \u2500\u2500 FORMAT FINAL RESPONSE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# _items[0]['json'] is the merged item from Merge Synthesis with State.\n# It contains:\n#   output          - synthesis text (from Synthesize Answer AI Agent)\n#   subQueries      - list of sub-queries (from Collect All Episodes)\n#   episodes        - all episode objects (from Collect All Episodes)\n#   tokenBudget     - cumulative budget (from Collect All Episodes)\n#   rollingSummary  - Layer 3 narrative (from Collect All Episodes)\n\nitem = _items[0]['json']\n\nsynthesis = item.get('output', '')\nbudget    = item.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\n\nreturn [{'json': {\n    'answer':          synthesis,\n    'sub_queries':     item.get('subQueries', []),\n    'episodes':        item.get('episodes', []),\n    'rolling_summary': item.get('rollingSummary', ''),\n    'token_usage': {\n        'consumed':        budget.get('consumed', 0),\n        'limit':           budget.get('limit', 10000),\n        'remaining':       budget.get('limit', 10000) - budget.get('consumed', 0),\n        'utilization_pct': round(budget.get('consumed', 0) / budget.get('limit', 10000) * 100, 1),\n        'calls':           budget.get('calls', [])\n    },\n    'memory_strategy': 'hierarchical_episodic_3layer',\n    'success': True\n}}]\n"
+      },
+      "id": "de4437cc-9afd-475a-a45b-a62ccdcafb40",
+      "name": "Format Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3664,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        3888,
+        512
+      ],
+      "id": "92dc37a2-6f5f-4204-b583-300fd53a148c",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ss-1",
+              "name": "originalQuery",
+              "value": "={{ $json.originalQuery }}",
+              "type": "string"
+            },
+            {
+              "id": "ss-2",
+              "name": "maxSubQueries",
+              "value": "={{ $json.maxSubQueries }}",
+              "type": "number"
+            },
+            {
+              "id": "ss-3",
+              "name": "tokenBudget",
+              "value": "={{ $json.tokenBudget }}",
+              "type": "object"
+            },
+            {
+              "id": "ss-4",
+              "name": "episodes",
+              "value": "={{ $json.episodes }}",
+              "type": "array"
+            },
+            {
+              "id": "ss-5",
+              "name": "sources",
+              "value": "={{ $json.sources }}",
+              "type": "array"
+            },
+            {
+              "id": "ss-6",
+              "name": "rollingSummary",
+              "value": "={{ $json.rollingSummary }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "includeOtherFields": true
+        }
+      },
+      "id": "snapshot-state-pre-decompose",
+      "name": "Snapshot State",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        592,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# \u2500\u2500 EXPAND TO ITEMS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Receives 1 item: {subQueries:[Q1,Q2,...], originalQuery, tokenBudget, ...}\n# Outputs N items: one per sub-query, each carrying the shared state.\n# splitInBatches will then emit them one at a time.\n\nstate = _items[0]['json']\nsub_queries     = state.get('subQueries', [])\noriginal_query  = state.get('originalQuery', '')\nmax_sub_queries = state.get('maxSubQueries', 4)\ntoken_budget    = state.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\nsources         = state.get('sources', [])\nrolling_summary = state.get('rollingSummary', '')\n\nresult = []\nfor i, sq in enumerate(sub_queries):\n    result.append({'json': {\n        'subQuery':      sq,\n        'index':         i,\n        'totalQueries':  len(sub_queries),\n        'originalQuery': original_query,\n        'maxSubQueries': max_sub_queries,\n        'tokenBudget':   token_budget,\n        'sources':       sources,\n        'rollingSummary': rolling_summary\n    }})\n\nreturn result\n"
+      },
+      "id": "expand-to-items",
+      "name": "Expand to Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "loop-over-items-correct",
+      "name": "Loop Over Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1264,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# \u2500\u2500 COLLECT ALL EPISODES \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Runs once after ALL sub-queries complete.\n# _items contains ALL Store Episode outputs (one per sub-query).\n# Merges them into a single state object for synthesis.\n\nepisodes = []\nmerged_budget = {'limit': 10000, 'consumed': 0, 'calls': []}\noriginal_query  = ''\nmax_sub_queries = 4\nsources         = []\nrolling_summary = ''\n\nfor item in _items:\n    d = item['json']\n    episodes.append({\n        'id':    d.get('episodeId', len(episodes) + 1),\n        'query': d.get('subQuery', ''),\n        'answer':d.get('answer', '')\n    })\n    # Use the last item's budget (it's cumulative per-item, sum manually)\n    budget = d.get('tokenBudget', {})\n    merged_budget['limit']    = budget.get('limit', 10000)\n    merged_budget['consumed'] = merged_budget['consumed'] + (budget.get('consumed', 0) - (0 if len(episodes)==1 else 0))\n    merged_budget['calls']    = merged_budget['calls'] + budget.get('calls', [])\n    original_query  = d.get('originalQuery', original_query)\n    max_sub_queries = d.get('maxSubQueries', max_sub_queries)\n    sources         = d.get('sources', sources)\n    rolling_summary = d.get('rollingSummary', rolling_summary)\n\n# Fix budget: sum only the sub_query calls (avoid double-counting)\nsq_calls = [c for c in merged_budget['calls'] if c.get('step','').startswith('sub_query_')]\ntotal_consumed = sum(c.get('tokens', 0) for c in sq_calls)\nmerged_budget['consumed'] = total_consumed\nmerged_budget['calls']    = sq_calls\n\nepisodes.sort(key=lambda e: e['id'])\n\nreturn [{'json': {\n    'originalQuery':  original_query,\n    'maxSubQueries':  max_sub_queries,\n    'subQueries':     [e['query'] for e in episodes],\n    'episodes':       episodes,\n    'sources':        sources,\n    'rollingSummary': rolling_summary,\n    'tokenBudget':    merged_budget\n}}]\n"
+      },
+      "id": "collect-all-episodes",
+      "name": "Collect All Episodes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2544,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {}
+      },
+      "id": "synth-openai-model",
+      "name": "Synthesis OpenAI Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        3440,
+        640
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "d05xXuXjh96jCN7e",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combineByPosition",
+        "options": {}
+      },
+      "id": "merge-synthesis-state",
+      "name": "Merge Synthesis with State",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        3760,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combineByPosition",
+        "options": {}
+      },
+      "id": "merge-agent-output",
+      "name": "Merge Agent Output",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2176,
+        384
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Init Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init Session": {
+      "main": [
+        [
+          {
+            "node": "Check Query Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Query Valid": {
+      "main": [
+        [
+          {
+            "node": "Snapshot State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decompose Query": {
+      "main": [
+        [
+          {
+            "node": "Parse Sub-queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Window Buffer Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "web_search": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wikipedia": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calculator": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Synthesize Answer": {
+      "main": [
+        [
+          {
+            "node": "Merge Synthesis with State",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Format Final Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Snapshot State": {
+      "main": [
+        [
+          {
+            "node": "Decompose Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Sub-queries": {
+      "main": [
+        [
+          {
+            "node": "Expand to Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand to Items": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Collect All Episodes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Capture Loop State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Loop State": {
+      "main": [
+        [
+          {
+            "node": "Merge Agent Output",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Merge Agent Output",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Store Episode": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect All Episodes": {
+      "main": [
+        [
+          {
+            "node": "Merge Synthesis with State",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Synthesize Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Synthesis OpenAI Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Synthesize Answer",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Synthesis with State": {
+      "main": [
+        [
+          {
+            "node": "Format Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Agent Output": {
+      "main": [
+        [
+          {
+            "node": "Store Episode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "57412d4b-262c-43ce-a5b9-0e932a6bab14",
+  "meta": {
+    "instanceId": "0bb99b4e1cd1c6e832bb670cbe58268d9f13a7c80f934e5dbc37216371058852"
+  },
+  "id": "c2klJo1w8Q8w9UWM",
+  "tags": []
+}
