@@ -1,173 +1,76 @@
 # Deep Research Agent
 
-A production-ready, memory-constrained multi-step research agent built on Claude (Anthropic).  The agent answers complex, multi-part research questions while enforcing explicit token budgets at every stage of processing.
+A memory-constrained research agent that answers complex queries by decomposing them into sub-questions, researching each independently, and synthesising a cited final answer. Built as an n8n workflow with a Python reference implementation and a full E2E test suite.
+
+![Architecture](docs/architecture.svg)
 
 ---
 
-## Quick Start
+## Table of Contents
 
-```bash
-# 1. Clone & enter project
-git clone <repo-url>
-cd deep-research-agent
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Set API key
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# 4. Run the API server
-uvicorn src.api.app:app --reload --port 8000
-
-# 5. Run tests
-pytest tests/ -v
-
-# 6. Submit a research query
-curl -X POST http://localhost:8000/research \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Compare transformer and LSTM architectures for NLP tasks: what are the trade-offs in performance, training cost, and deployment complexity?"}'
-```
+1. [Overview](#overview)
+2. [Self-Defined Constraints](#self-defined-constraints)
+3. [Memory Architecture](#memory-architecture)
+4. [Workflow Architecture](#workflow-architecture)
+5. [Project Structure](#project-structure)
+6. [Quick Start](#quick-start)
+7. [API Reference](#api-reference)
+8. [Tools](#tools)
+9. [Running the Test Suite](#running-the-test-suite)
+10. [Design Decisions](#design-decisions)
 
 ---
 
-## Architecture
+## Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        FastAPI REST Layer                           │
-│   POST /research   GET /research/{id}   GET /health   GET /metrics  │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │   DeepResearchAgent   │
-                    │   (Orchestrator)      │
-                    └───┬──────┬───────┬───┘
-                        │      │       │
-           ┌────────────▼─┐ ┌──▼───┐ ┌▼────────────────┐
-           │QueryDecomposer│ │Memory│ │AnswerSynthesizer│
-           │  (LLM → JSON)│ │Mgr   │ │  (Final merge)  │
-           └──────────────┘ └──┬───┘ └─────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   Memory Hierarchy  │
-                    │  Layer 1: Buffer    │
-                    │  Layer 2: Episodes  │
-                    │  Layer 3: Summary   │
-                    └─────────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │    ToolRegistry     │
-                    │  web_search         │
-                    │  wikipedia          │
-                    │  calculator         │
-                    │  doc_reader         │
-                    └─────────────────────┘
-```
+The agent receives a natural-language query via a webhook, decides whether to decompose it into sub-questions (handled by the LLM — no hard-coded rules), researches each sub-question using web search, Wikipedia, and a calculator, then synthesises all sub-answers into a coherent final response with inline citations `[Ep1]`, `[Ep2]`, etc.
 
-### Component Responsibilities
+**Key properties:**
+- LLM-driven decomposition — simple queries run in a single pass; complex queries spawn 2–6 sub-questions
+- Memory-bounded — episodic store grows linearly; rolling summary compression triggers at ≥ 6 episodes
+- Tool-resilient — Wikipedia 404s and DuckDuckGo failures are caught and fallen back to gracefully
+- Zero third-party Python dependencies in the test suite — runs on bare Python 3.8+
 
-| Component | File | Responsibility |
+---
+
+## Self-Defined Constraints
+
+| Constraint | Value | Where enforced |
 |---|---|---|
-| `DeepResearchAgent` | `src/agent/research_agent.py` | Top-level orchestrator; manages the agentic loop |
-| `QueryDecomposer` | `src/agent/query_decomposer.py` | Breaks complex queries into ≤5 atomic sub-questions |
-| `AnswerSynthesizer` | `src/agent/answer_synthesizer.py` | Merges sub-answers into a coherent final response |
-| `MemoryManager` | `src/memory/memory_manager.py` | Episodic storage, relevance retrieval, LLM compression |
-| `TokenBudget` | `src/memory/token_budget.py` | Tracks cumulative token consumption across a session |
-| `ToolRegistry` | `src/tools/tool_registry.py` | Dispatches web_search, wikipedia, calculator, doc_reader |
-| FastAPI app | `src/api/app.py` | REST endpoints: sync research, async jobs, metrics |
+| Session token budget | 10,000 tokens | `Init Session` code node |
+| Per-call context cap | 2,000 chars injected memory | `Capture Loop State` set node |
+| Max sub-queries | 4 (configurable per request) | `max_sub_queries` payload field |
+| Rolling summary threshold | ≥ 6 episodes | `Store Episode` code node |
+| Working memory window | 4 turns | `Window Buffer Memory` node |
+| Compression model | `gpt-4o-mini` | `Decompose Query` HTTP node |
+| Research model | `gpt-4o-mini` | `OpenAI Chat Model` node |
 
 ---
 
-## Memory Strategy
+## Memory Architecture
 
-The agent uses a **3-layer hierarchical episodic memory**:
+Three layers operate simultaneously during a research session.
 
-```
-Layer 3: Rolling Narrative (LLM-compressed)
-          ↑ Generated when episodic store grows beyond threshold
-Layer 2: Episodic Store (structured Episode objects)
-          ↑ Written after each completed sub-query
-Layer 1: Working Buffer (raw message list for current LLM call)
-          ↑ Compressed on the fly when approaching token limit
-```
+**Layer 1 — Window Buffer Memory** (working memory)  
+A 4-turn conversation buffer managed by n8n's LangChain `memoryBufferWindow` node. Scoped per agent call — the AI Agent sees the last 4 tool-use turns from its own current sub-query. Discarded after each episode is stored.
 
-**Retrieval** uses Jaccard similarity on keyword sets — zero latency, no embedding overhead, sufficient for ≤10 episodes per session.
+**Layer 2 — Episodic Store** (medium-term memory)  
+A structured array of episode objects, each containing `id`, `query`, and `answer`. Threaded through Code nodes via item fields. The last 3 episodes (capped at 2,000 chars) are injected as context into each agent call via the `episodesContext` field in `Capture Loop State`. Grows linearly with the number of sub-queries.
 
-**Compression** is triggered when the working buffer exceeds 75% of the per-call token limit.  The compressor uses `claude-haiku` (fast, cheap) to summarise older messages, preserving the most recent turn intact.
+**Layer 3 — Rolling Summary** (long-term compression)  
+When episode count reaches the threshold (≥ 6), all current episodes are compressed into a single narrative string by a dedicated `gpt-4o-mini` call. The compressed summary replaces the full episodes array, bounding memory growth for long sessions. The summary is injected into subsequent agent calls as `[Session Summary]`.
 
 ---
 
-## Token Constraints
+## Workflow Architecture
 
-| Constraint | Default | Config Key |
-|---|---|---|
-| Max tokens per LLM call | 2,000 | `max_context_tokens` |
-| Session token budget | 10,000 | `max_session_tokens` |
-| Compression trigger | 75% of per-call limit | `summarization_threshold` |
-| Max sub-queries | 5 | `max_sub_queries` |
-| Max iterations per sub-query | 3 | `max_iterations_per_query` |
+![Alt text](docs/workflow.png)
 
-All constraints are configurable via `ResearchConfig` or the API request body.
+**Critical design notes:**
 
----
+Two `Merge` nodes solve the AI Agent's state-drop problem. The LangChain AI Agent node outputs only `{output: "..."}` and drops all input item fields. `Merge Agent Output` (inside the loop) and `Merge Synthesis with State` (after synthesis) use `combineByPosition` to rejoin the dropped state with the agent's answer before downstream code nodes read it.
 
-## API Reference
-
-### `POST /research`
-
-Synchronous research endpoint.
-
-```json
-// Request
-{
-  "query": "What are the trade-offs between RAG and fine-tuning for LLM specialisation?",
-  "max_context_tokens": 2000,
-  "max_session_tokens": 10000,
-  "max_sub_queries": 4
-}
-
-// Response
-{
-  "session_id": "a1b2c3d4",
-  "original_query": "...",
-  "sub_queries": ["What is RAG?", "What is fine-tuning?", "..."],
-  "final_answer": "...",
-  "sources": [{"title": "...", "url": "..."}],
-  "token_usage": {"consumed": 1847, "limit": 10000, "remaining": 8153, "utilization_pct": 18.5},
-  "elapsed_seconds": 3.2,
-  "memory_strategy": "hierarchical_episodic",
-  "success": true
-}
-```
-
-### `POST /research/async`
-
-Returns a `job_id`.  Poll `GET /research/{job_id}` for status and result.
-
-### `GET /metrics`
-
-Returns aggregate token usage across all sessions in the current process.
-
----
-
-## Testing
-
-```bash
-# Run full test suite
-pytest tests/ -v --tb=short
-
-# Run specific test class
-pytest tests/test_suite.py::TestMemoryManager -v
-
-# With coverage
-pytest tests/ --cov=src --cov-report=html
-```
-
-Test categories:
-- **Unit** — `TokenBudget`, `MemoryManager`, `QueryDecomposer`, `AnswerSynthesizer`, `ToolRegistry`
-- **Integration** — `DeepResearchAgent` end-to-end with mocked Anthropic client
-- **Edge cases** — Empty inputs, budget exhaustion, API failures, malformed LLM outputs
+`splitInBatches` is the only supported loop primitive in n8n. Because n8n's execution engine does not support cycles (a node cannot be re-entered after it has already run in the same execution), the loop is structured by pre-expanding sub-queries into N separate items — one per sub-query — before the batch node. `splitInBatches` emits them one at a time and loops back to itself correctly.
 
 ---
 
@@ -175,62 +78,159 @@ Test categories:
 
 ```
 deep-research-agent/
-├── src/
-│   ├── agent/
-│   │   ├── research_agent.py      # Core orchestrator
-│   │   ├── query_decomposer.py    # LLM-based decomposition
-│   │   └── answer_synthesizer.py  # Final answer merging
-│   ├── memory/
-│   │   ├── memory_manager.py      # Episodic memory + compression
-│   │   └── token_budget.py        # Session token accounting
-│   ├── tools/
-│   │   └── tool_registry.py       # Tool dispatch (web, wiki, calc, doc)
-│   └── api/
-│       └── app.py                 # FastAPI REST layer
+├── n8n_workflow/
+│   └── deep-research-agent.json   n8n importable workflow
 ├── tests/
-│   └── test_suite.py              # 38 unit + integration tests
+│   └── test_n8n_workflow.py                       unit + integration tests
+|                     n8n E2E test harness (3-layer evaluation)
 ├── docs/
-│   └── evaluation.md              # Architecture trade-off analysis
-├── config/
-│   └── settings.yaml              # Default configuration
-├── requirements.txt
+│   ├── evaluation.md                       architecture trade-offs + empirical results
+│   └── architecture.svg                    workflow diagram
 └── README.md
 ```
 
 ---
 
-## Configuration
+## Quick Start
 
-Override defaults via environment variables or `config/settings.yaml`:
+### n8n workflow
 
-```yaml
-agent:
-  max_context_tokens: 2000
-  max_session_tokens: 10000
-  max_sub_queries: 5
-  max_iterations_per_query: 3
-  summarization_threshold: 0.75
-  model: "claude-sonnet-4-20250514"
+1. Import `n8n_workflow/deep-research-agent.json` into your n8n instance
+2. Add your OpenAI credential — search for `"OpenAI account"` in the workflow and connect it to `Decompose Query`, `AI Agent`, and `Synthesis AI Agent`
+3. Click **Activate** in the top-right
+4. Send a POST request to the webhook URL:
 
-memory:
-  summarize_after: 3  # Episodes before rolling summary kicks in
-
-api:
-  host: "0.0.0.0"
-  port: 8000
-  workers: 4
+```bash
+curl -X POST https://your-instance.n8n.cloud/webhook/research \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Compare RAG vs fine-tuning for LLM specialisation", "max_sub_queries": 4}'
 ```
 
 ---
 
-## Production Deployment
+## API Reference
 
-For multi-user scale:
+### Request
 
-1. **Replace in-memory job store** → Redis + Celery
-2. **Replace episodic store** → Pinecone / Weaviate for cross-session persistence
-3. **Add rate limiting** → FastAPI middleware or NGINX
-4. **Monitor token budgets** → per-user quotas backed by PostgreSQL
-5. **Cache decompositions** → Redis with query hash as key, 1-hour TTL
+```json
+{
+  "query": "string — the research question",
+  "max_sub_queries": 4
+}
+```
 
-See `docs/evaluation.md` for a full discussion of scalability trade-offs.
+### Response
+
+```json
+{
+  "answer": "Full synthesised answer with [Ep1], [Ep2] citations",
+  "sub_queries": ["sub-question 1", "sub-question 2", "..."],
+  "episodes": [
+    {
+      "id": 1,
+      "query": "sub-question 1",
+      "answer": "agent answer with tool citations"
+    }
+  ],
+  "rolling_summary": "LLM-compressed narrative (non-empty only when ≥6 episodes ran)",
+  "token_usage": {
+    "consumed": 1922,
+    "limit": 10000,
+    "remaining": 8078,
+    "utilization_pct": 19.2,
+    "calls": [
+      {"step": "sub_query_1", "tokens": 412},
+      {"step": "sub_query_2", "tokens": 361}
+    ]
+  },
+  "memory_strategy": "hierarchical_episodic_3layer",
+  "success": true
+}
+```
+
+### Error response (HTTP 400)
+
+```json
+{
+  "error": "Missing or empty query parameter",
+  "message": "Please provide a valid 'query' field in the request body",
+  "example": {"query": "What is quantum computing?", "max_sub_queries": 3}
+}
+```
+
+---
+
+## Tools
+
+The AI Agent has access to three tools. All run without API keys.
+
+| Tool | Endpoint | Purpose |
+|---|---|---|
+| `web_search` | DuckDuckGo Instant Answer API | Current facts, news, recent events |
+| `wikipedia` | Wikipedia REST v1 `/page/summary/{title}` | Reference summaries for established concepts |
+| `calculator` | JS `Function()` safe eval | Arithmetic and mathematical expressions |
+
+---
+
+## Running the Test Suite
+
+### n8n E2E tests (recommended)
+
+Tests the live workflow directly via HTTP. No dependencies beyond Python 3.8+.
+
+```bash
+export N8N_WEBHOOK_URL="https://your-instance.n8n.cloud/webhook/research"
+export OPENAI_API_KEY="sk-..."   # enables LLM-as-judge scoring
+
+# All 9 tests
+python test_n8n_workflow.py
+
+# Skip LLM judge (faster, no OpenAI calls)
+python test_n8n_workflow.py --no-judge
+
+# Single test
+python test_n8n_workflow.py --test rolling_summary_trigger
+
+# By category
+python test_n8n_workflow.py --category edge_case
+```
+
+Results are written to `test_outputs/`:
+- `test_run_<ts>.json` — raw responses + all check results
+- `evaluation_section_<ts>.md` — ready to append to `docs/evaluation.md`
+
+```bash
+cat test_outputs/evaluation_section_*.md >> docs/evaluation.md
+```
+
+### Test cases
+
+| id | Category | What it verifies |
+|---|---|---|
+| `simple_definition` | simple | LLM returns 1 sub-query for "What is ML?" |
+| `simple_concept` | simple | Consistent single-pass on a second simple query |
+| `comparison_rag_finetuning` | comparison | Both topics cited, [Ep1]–[EpN] present |
+| `comparison_sql_nosql` | comparison | Cross-domain generalisation |
+| `multi_part_gradient` | multi_part | Sequential IDs, chained sub-answers |
+| `token_budget_check` | edge_case | 4-part query stays under 10,000 tokens |
+| `rolling_summary_trigger` | edge_case | 6 sub-queries → `rolling_summary` non-empty |
+| `budget_exhaustion` | edge_case | 500-token budget → partial answer, no crash |
+| `empty_query` | error_handling | HTTP 400, no crash |
+
+### Evaluation layers
+
+1. **Structural checks** — field presence, sequential episode IDs, token budget compliance, citation presence
+2. **Golden test set** — keyword coverage scoring against `must_cover` lists; both sides present for comparison queries
+3. **LLM-as-judge** — GPT-4o-mini scores faithfulness, completeness, and coherence (0–10) with per-test criteria and minimum thresholds
+
+---
+
+## Design Decisions
+
+See `docs/evaluation.md` for full trade-off analysis. Key decisions:
+
+**LLM-driven decomposition** — the decomposition prompt instructs the LLM to return `["original query"]` for simple questions and 2–N sub-questions for complex ones. This avoids hard-coded word-count heuristics and correctly handles edge cases like short-but-complex queries ("Compare RAG vs fine-tuning" — 5 words, but genuinely needs decomposition).
+
+**`splitInBatches` as the loop primitive** — n8n does not support cycles; an IF node visited twice in the same execution is short-circuited. The only correct loop pattern is `splitInBatches`, which is designed to be re-entered. Sub-queries are pre-expanded into N separate items by the `Expand to Items` Code node before reaching the batch node.
+
+**Merge nodes for state preservation** — the LangChain AI Agent node outputs only `{output: "...text..."}` and drops all input fields. Two Merge nodes (`combineByPosition`) are used to rejoin dropped state: `Merge Agent Output` inside the loop (reunites `Capture Loop State` fields with the agent answer before `Store Episode`), and `Merge Synthesis with State` after synthesis (reunites `Collect All Episodes` state with the synthesis answer before `Format Final Response`).
