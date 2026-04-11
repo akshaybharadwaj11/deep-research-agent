@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Deep Research Agent \u2014 Memory Constraints\n\n**Self-Defined Constraints (enforced in code)**\n- Session token budget: 10 000 tokens total\n- Per-call context cap: 2 000 chars (~500 tokens) of injected memory\n- Max sub-queries: 4\n- Rolling summary triggers at: \u2265 6 episodes\n- Compression model: gpt-4o-mini (cheap)\n- Research model: gpt-4o-mini\n\n**Memory Architecture \u2014 3 Layers**\n1. Window Buffer Memory \u2014 4-turn working buffer (built-in)\n2. Episodic Store \u2014 structured episode objects threaded through Code nodes\n3. Rolling Summary \u2014 LLM-compressed narrative, replaces episodes when count \u2265 3\n\n**Tools available to AI Agent**\n- web_search (DuckDuckGo, no API key required)\n- wikipedia (REST v1, no API key required)\n- calculator (safe eval)\n\n**How to activate**\n1. Add your OpenAI credential to the three HTTP Request nodes\n2. Click Activate in the top-right\n3. POST to the webhook URL with: { \"query\": \"...\", \"max_sub_queries\": 4 }",
+        "content": "## Deep Research Agent \u2014 Memory Constraints\n\n**Self-Defined Constraints (enforced in code)**\n- Session token budget: 10 000 tokens total\n- Episode answer cap: 2 000 chars per stored answer\nSynthesis context cap: 500 chars per episode in synthesis prompt\n- Max sub-queries: 4\n- Rolling summary triggers at: \u2265 6 episodes\n- Compression model: gpt-4o-mini (cheap)\n- Research model: gpt-4o-mini\n\n**Memory Architecture \u2014 3 Layers**\n1. Window Buffer Memory \u2014 4-turn working buffer (built-in)\n2. Episodic Store \u2014 structured episode objects threaded through Code nodes\n3. Rolling Summary \u2014 LLM-compressed narrative, replaces episodes when count \u2265 6\n\n**Tools available to AI Agent**\n- web_search (DuckDuckGo, no API key required)\n- wikipedia (REST v1, no API key required)\n- calculator (safe eval)\n\n**How to activate**\n1. Add your OpenAI credential to the three HTTP Request nodes\n2. Click Activate in the top-right\n3. POST to the webhook URL with: { \"query\": \"...\", \"max_sub_queries\": 4 }",
         "height": 420,
         "width": 480,
         "color": 5
@@ -37,7 +37,7 @@
     {
       "parameters": {
         "language": "pythonNative",
-        "pythonCode": "# \u2500\u2500 INIT SESSION \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Runs once per request. Initialises all session state.\n# FIX: budget limit corrected to 10000 (was 2000 \u2014 too low, exhausted after 1st sub-query)\n\nbody = _items[0]['json'].get('body', _items[0]['json'])\nquery = body.get('query', '').strip()\nmax_sub_queries = int(body.get('max_sub_queries', 4))\n\nreturn [{\n  'json': {\n    'originalQuery': query,\n    'maxSubQueries': max_sub_queries,\n    'tokenBudget': {\n      'limit': 10000,\n      'consumed': 0,\n      'calls': []\n    },\n    'episodes': [],\n    'sources': [],\n    'rollingSummary': ''\n  }\n}]"
+        "pythonCode": "# \u2500\u2500 INIT SESSION \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Runs once per request. Initialises all session state.\n# FIX: budget limit corrected to 10000 (was 2000 \u2014 too low, exhausted after 1st sub-query)\n\nbody = _items[0]['json'].get('body', _items[0]['json'])\nquery = body.get('query', '').strip()\nmax_sub_queries = int(body.get('max_sub_queries', 4))\n\nreturn [{\n  'json': {\n    'originalQuery': query,\n    'maxSubQueries': max_sub_queries,\n    'tokenBudget': {\n      'limit': int(body.get('max_session_tokens', 10000)),\n      'consumed': 0,\n      'calls': []\n    },\n    'episodes': [],\n    'sources': [],\n    'rollingSummary': ''\n  }\n}]"
       },
       "id": "80b63882-a0ba-42a2-b8fe-cee6dd60ccff",
       "name": "Init Session",
@@ -105,7 +105,7 @@
         "nodeCredentialType": "openAiApi",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"max_tokens\": 400,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a research planning assistant. Break complex queries into atomic sub-questions. Return ONLY a JSON array of strings, no other text, no markdown fences.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Break this research query into at most {{ $json.maxSubQueries }} atomic sub-questions. Each must be independently answerable.\\n\\nQuery: {{ $json.originalQuery }}\"\n    }\n  ]\n}",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"max_tokens\": 400,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a research planning assistant. Your job is to decide whether a query needs to be broken into sub-questions, and if so, how.\\n\\nRules:\\n- If the query is simple, self-contained, or answerable in one step, return a JSON array with just the original query: [\\\"original query here\\\"]\\n- If the query is complex, multi-part, comparative, or requires researching independent topics, break it into 2-{{ $json.maxSubQueries }} atomic sub-questions.\\n- Each sub-question must be independently answerable.\\n- Return ONLY a valid JSON array of strings. No explanation, no markdown, no extra text.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Query: {{ $json.originalQuery }}\"\n    }\n  ]\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -213,7 +213,7 @@
         "promptType": "define",
         "text": "=You are a rigorous research assistant. Answer this sub-question using your tools.\nBe concise \u2014 cite sources inline.\n\nSub-question: {{ $json.currentSubQuery }}\n\n{% if $json.rollingSummary %}[Session Summary]\n{{ $json.rollingSummary }}\n\n{% endif %}",
         "options": {
-          "systemMessage": "You are a research assistant with tool access. Use tools to gather facts, then write a concise answer (100-200 words) with citations. Stop using tools once you have sufficient evidence."
+          "systemMessage": "You are a research assistant with tool access. Use tools to gather facts, then write a concise answer (100-200 words) with citations. Stop using tools once you have sufficient evidence.\n\nTool error handling:\n- If wikipedia returns a 'not found' or 'Not found' response, immediately fall back to web_search with the same topic.\n- If web_search returns an empty or unhelpful result, answer using your own knowledge and note the source limitation.\n- Never retry a failed tool call with identical parameters.\n- Always produce a complete answer even if tools return no results."
         }
       },
       "type": "@n8n/n8n-nodes-langchain.agent",
@@ -270,7 +270,13 @@
       "parameters": {
         "toolDescription": "Search the web for current facts, news, and research on any topic",
         "url": "=https://api.duckduckgo.com/?q={{ encodeURIComponent($fromAI('query', 'the search query')) }}&format=json&no_html=1&skip_disambig=1",
-        "options": {}
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
       },
       "type": "n8n-nodes-base.httpRequestTool",
       "typeVersion": 4.4,
@@ -283,12 +289,18 @@
     },
     {
       "parameters": {
-        "toolDescription": "Get a Wikipedia article summary for a well-known topic, concept, person, or event",
+        "toolDescription": "Look up a Wikipedia article summary by exact article title. Returns the article extract on success. If the response contains 'title' field with value 'Not found' or a 'detail' field, the page was not found \u2014 do NOT retry with the same title. Instead, fall back to the web_search tool with a broader query.",
         "url": "=https://en.wikipedia.org/api/rest_v1/page/summary/{{ encodeURIComponent($fromAI('topic', 'the Wikipedia article title')) }}",
         "sendHeaders": true,
         "specifyHeaders": "json",
         "jsonHeaders": "{ \"User-Agent\": \"n8n-deep-research-agent/1.0\" }",
-        "options": {}
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
       },
       "type": "n8n-nodes-base.httpRequestTool",
       "typeVersion": 4.4,
@@ -316,7 +328,7 @@
     {
       "parameters": {
         "language": "pythonNative",
-        "pythonCode": "# \u2500\u2500 STORE EPISODE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# _items[0]['json'] is the merged item from Merge Agent Output:\n#   output         - AI Agent answer text\n#   subQuery       - the sub-question that was answered\n#   index          - 0-based position of this sub-query\n#   tokenBudget    - budget object for this item\n#   originalQuery  - the top-level user query\n#   maxSubQueries  - total planned sub-queries\n#   totalQueries   - same as maxSubQueries\n#   sources        - accumulated sources\n#   rollingSummary - Layer 3 summary if triggered\n\nitem         = _items[0]['json']\nagent_output = item.get('output', '(no answer)')\nindex        = item.get('index', 0)\nsub_query    = item.get('subQuery', item.get('currentSubQuery', ''))\ntoken_budget = item.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\n\nestimated_tokens = round(len(agent_output) / 4) + 200\nupdated_budget = {\n    'limit':    token_budget.get('limit', 10000),\n    'consumed': token_budget.get('consumed', 0) + estimated_tokens,\n    'calls':    token_budget.get('calls', []) + [{'step': 'sub_query_' + str(index + 1), 'tokens': estimated_tokens}]\n}\n\nreturn [{'json': {\n    'episodeId':     index + 1,\n    'index':         index,\n    'subQuery':      sub_query,\n    'answer':        agent_output,\n    'originalQuery': item.get('originalQuery', ''),\n    'maxSubQueries': item.get('maxSubQueries', 4),\n    'totalQueries':  item.get('totalQueries', 4),\n    'tokenBudget':   updated_budget,\n    'sources':       item.get('sources', []),\n    'rollingSummary':item.get('rollingSummary', '')\n}}]\n"
+        "pythonCode": "# \u2500\u2500 STORE EPISODE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# _items[0]['json'] is the merged item from Merge Agent Output:\n#   output         - AI Agent answer text\n#   subQuery       - the sub-question that was answered\n#   index          - 0-based position of this sub-query\n#   tokenBudget    - budget object for this item\n#   originalQuery  - the top-level user query\n#   maxSubQueries  - total planned sub-queries\n#   totalQueries   - same as maxSubQueries\n#   sources        - accumulated sources\n#   rollingSummary - Layer 3 summary if triggered\n\nitem         = _items[0]['json']\nagent_output_raw = item.get('output', '(no answer)')\n# Cap individual episode answers at 2000 chars to bound synthesis context.\n# The full answer is preserved in the raw field for logging if needed.\nEPISODE_ANSWER_CAP = 2000\nagent_output = agent_output_raw[:EPISODE_ANSWER_CAP]\nindex        = item.get('index', 0)\nsub_query    = item.get('subQuery', item.get('currentSubQuery', ''))\ntoken_budget = item.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\n\nestimated_tokens = round(len(agent_output_raw) / 4) + 200  # use raw length for accurate budget tracking\nupdated_budget = {\n    'limit':    token_budget.get('limit', 10000),\n    'consumed': token_budget.get('consumed', 0) + estimated_tokens,\n    'calls':    token_budget.get('calls', []) + [{'step': 'sub_query_' + str(index + 1), 'tokens': estimated_tokens}]\n}\n\nreturn [{'json': {\n    'episodeId':     index + 1,\n    'index':         index,\n    'subQuery':      sub_query,\n    'answer':        agent_output,\n    'originalQuery': item.get('originalQuery', ''),\n    'maxSubQueries': item.get('maxSubQueries', 4),\n    'totalQueries':  item.get('totalQueries', 4),\n    'tokenBudget':   updated_budget,\n    'sources':       item.get('sources', []),\n    'rollingSummary':item.get('rollingSummary', '')\n}}]\n"
       },
       "id": "397f50d4-0f45-4cf3-bb4f-9691e415a9ed",
       "name": "Store Episode",
@@ -330,9 +342,9 @@
     {
       "parameters": {
         "promptType": "define",
-        "text": "=You are a senior research analyst.\n\nOriginal question: {{ $json.originalQuery }}\n\n{% if $json.rollingSummary %}[Session Summary]\n{{ $json.rollingSummary }}\n\n{% endif %}[Research Evidence]\n{{ $json.episodes.map(e => '[Ep' + e.id + '] Q: ' + e.query + '\\nA: ' + e.answer).join('\\n\\n') }}\n\nWrite a complete, well-structured answer to the original question citing [Ep1], [Ep2] etc. Be thorough and integrate all evidence.",
+        "text": "=You are a senior research analyst.\n\nOriginal question: {{ $json.originalQuery }}\n\n{% if $json.rollingSummary %}Background (compressed prior research):\n{{ $json.rollingSummary }}\n\n{% endif %}Sub-question answers to synthesise:\n{{ $json.episodes.map(e => '[Ep' + e.id + '] Q: ' + e.query + '\\nA: ' + e.answer.substring(0, 500)).join('\\n\\n') }}\n\nWrite a direct, well-structured answer to the original question above. Cite supporting sub-answers as [Ep1], [Ep2], etc. Do not start with a heading like 'Session Summary' \u2014 begin with the actual answer content.",
         "options": {
-          "systemMessage": "You are a senior research analyst. Synthesise the research evidence into a coherent, well-cited final answer. Cite sub-answers as [Ep1], [Ep2], etc."
+          "systemMessage": "You are a senior research analyst writing a final answer to a research question. Your job is to synthesise the sub-question answers below into one coherent, well-cited response.\n\nRules:\n- Start directly with the answer. Do NOT use 'Session Summary', 'Summary', or any meta-label as your first heading.\n- Use [Ep1], [Ep2], etc. to cite the sub-answers that support each claim.\n- Structure the answer logically around the original question, not around the sub-questions.\n- Be thorough but concise. Do not repeat the sub-question answers verbatim."
         }
       },
       "id": "ba684269-259f-44fb-ae51-9d058a670b6f",
@@ -429,7 +441,7 @@
     {
       "parameters": {
         "language": "pythonNative",
-        "pythonCode": "# \u2500\u2500 EXPAND TO ITEMS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Receives 1 item: {subQueries:[Q1,Q2,...], originalQuery, tokenBudget, ...}\n# Outputs N items: one per sub-query, each carrying the shared state.\n# splitInBatches will then emit them one at a time.\n\nstate = _items[0]['json']\nsub_queries     = state.get('subQueries', [])\noriginal_query  = state.get('originalQuery', '')\nmax_sub_queries = state.get('maxSubQueries', 4)\ntoken_budget    = state.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\nsources         = state.get('sources', [])\nrolling_summary = state.get('rollingSummary', '')\n\nresult = []\nfor i, sq in enumerate(sub_queries):\n    result.append({'json': {\n        'subQuery':      sq,\n        'index':         i,\n        'totalQueries':  len(sub_queries),\n        'originalQuery': original_query,\n        'maxSubQueries': max_sub_queries,\n        'tokenBudget':   token_budget,\n        'sources':       sources,\n        'rollingSummary': rolling_summary\n    }})\n\nreturn result\n"
+        "pythonCode": "# \u2500\u2500 EXPAND TO ITEMS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Receives 1 item: {subQueries:[Q1,Q2,...], originalQuery, tokenBudget, ...}\n# Outputs N items: one per sub-query, each carrying the shared state.\n# splitInBatches will then emit them one at a time.\n#\n# All sub-queries always run \u2014 dropping sub-queries would silently lose\n# coverage. Budget is tracked and reported post-hoc via tokenBudget.\n# Per-call memory is bounded by the 2,000-char context cap in\n# Capture Loop State, not by pre-filtering here.\n\nstate = _items[0]['json']\nsub_queries     = state.get('subQueries', [])\noriginal_query  = state.get('originalQuery', '')\nmax_sub_queries = state.get('maxSubQueries', 4)\ntoken_budget    = state.get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\nsources         = state.get('sources', [])\nrolling_summary = state.get('rollingSummary', '')\n\nresult = []\nfor i, sq in enumerate(sub_queries):\n    result.append({'json': {\n        'subQuery':      sq,\n        'index':         i,\n        'totalQueries':  len(sub_queries),\n        'originalQuery': original_query,\n        'maxSubQueries': max_sub_queries,\n        'tokenBudget':   token_budget,\n        'sources':       sources,\n        'rollingSummary': rolling_summary\n    }})\n\nreturn result\n"
       },
       "id": "expand-to-items",
       "name": "Expand to Items",
@@ -456,7 +468,7 @@
     {
       "parameters": {
         "language": "pythonNative",
-        "pythonCode": "# \u2500\u2500 COLLECT ALL EPISODES \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Runs once after ALL sub-queries complete.\n# _items contains ALL Store Episode outputs (one per sub-query).\n# Merges them into a single state object for synthesis.\n\nepisodes = []\nmerged_budget = {'limit': 10000, 'consumed': 0, 'calls': []}\noriginal_query  = ''\nmax_sub_queries = 4\nsources         = []\nrolling_summary = ''\n\nfor item in _items:\n    d = item['json']\n    episodes.append({\n        'id':    d.get('episodeId', len(episodes) + 1),\n        'query': d.get('subQuery', ''),\n        'answer':d.get('answer', '')\n    })\n    # Use the last item's budget (it's cumulative per-item, sum manually)\n    budget = d.get('tokenBudget', {})\n    merged_budget['limit']    = budget.get('limit', 10000)\n    merged_budget['consumed'] = merged_budget['consumed'] + (budget.get('consumed', 0) - (0 if len(episodes)==1 else 0))\n    merged_budget['calls']    = merged_budget['calls'] + budget.get('calls', [])\n    original_query  = d.get('originalQuery', original_query)\n    max_sub_queries = d.get('maxSubQueries', max_sub_queries)\n    sources         = d.get('sources', sources)\n    rolling_summary = d.get('rollingSummary', rolling_summary)\n\n# Fix budget: sum only the sub_query calls (avoid double-counting)\nsq_calls = [c for c in merged_budget['calls'] if c.get('step','').startswith('sub_query_')]\ntotal_consumed = sum(c.get('tokens', 0) for c in sq_calls)\nmerged_budget['consumed'] = total_consumed\nmerged_budget['calls']    = sq_calls\n\nepisodes.sort(key=lambda e: e['id'])\n\nreturn [{'json': {\n    'originalQuery':  original_query,\n    'maxSubQueries':  max_sub_queries,\n    'subQueries':     [e['query'] for e in episodes],\n    'episodes':       episodes,\n    'sources':        sources,\n    'rollingSummary': rolling_summary,\n    'tokenBudget':    merged_budget\n}}]\n"
+        "pythonCode": "# \u2500\u2500 COLLECT ALL EPISODES \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Runs once after ALL sub-queries complete.\n# _items contains ALL Store Episode outputs (one per sub-query).\n# Merges them into a single state object for synthesis.\n\nepisodes = []\nmerged_budget = {'limit': 10000, 'consumed': 0, 'calls': []}\noriginal_query  = ''\nmax_sub_queries = 4\nsources         = []\nrolling_summary = ''\n\nfor item in _items:\n    d = item['json']\n    episodes.append({\n        'id':    d.get('episodeId', len(episodes) + 1),\n        'query': d.get('subQuery', ''),\n        'answer':d.get('answer', '')\n    })\n    # Use the last item's budget (it's cumulative per-item, sum manually)\n    budget = d.get('tokenBudget', {})\n    merged_budget['limit']    = budget.get('limit', 10000)\n    merged_budget['consumed'] = merged_budget['consumed'] + (budget.get('consumed', 0) - (0 if len(episodes)==1 else 0))\n    merged_budget['calls']    = merged_budget['calls'] + budget.get('calls', [])\n    original_query  = d.get('originalQuery', original_query)\n    max_sub_queries = d.get('maxSubQueries', max_sub_queries)\n    sources         = d.get('sources', sources)\n    rolling_summary = d.get('rollingSummary', rolling_summary)\n\n# Fix budget: sum only the sub_query calls (avoid double-counting)\nsq_calls = [c for c in merged_budget['calls'] if c.get('step','').startswith('sub_query_')]\ntotal_consumed = sum(c.get('tokens', 0) for c in sq_calls)\nmerged_budget['consumed'] = total_consumed\nmerged_budget['calls']    = sq_calls\n\nepisodes.sort(key=lambda e: e['id'])\n\nneeds_compression = len(episodes) >= 6 and not rolling_summary\n\nreturn [{'json': {\n    'originalQuery':  original_query,\n    'maxSubQueries':  max_sub_queries,\n    'subQueries':     [e['query'] for e in episodes],\n    'episodes':       episodes,\n    'sources':        sources,\n    'rollingSummary': rolling_summary,\n    'needsCompression': needs_compression,\n    'tokenBudget':    merged_budget\n}}]\n"
       },
       "id": "collect-all-episodes",
       "name": "Collect All Episodes",
@@ -518,6 +530,151 @@
       "position": [
         2176,
         384
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "nrs-check",
+              "leftValue": "={{ $json.needsCompression }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "need-rolling-summary-new",
+      "name": "Need Rolling Summary?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2770,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"max_tokens\": 300,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a research memory system. Compress the research episodes into a concise narrative (max 200 words). Preserve all key facts, entities, numbers and conclusions. Write in third person past tense.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.episodes.map(e => '[Ep' + e.id + '] Q: ' + e.query + '\\nA: ' + e.answer).join('\\n\\n')) }}\n    }\n  ]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "includeInputFields": true
+            }
+          }
+        }
+      },
+      "id": "build-rolling-summary-new",
+      "name": "Build Rolling Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2990,
+        600
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "d05xXuXjh96jCN7e",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# \u2500\u2500 APPLY ROLLING SUMMARY \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# _items[0]['json'] contains the OpenAI response AND all state fields\n# from Collect All Episodes (via includeInputFields on Build Rolling Summary).\n\ncompressed = _items[0]['json']['choices'][0]['message']['content'].strip()\nusage       = _items[0]['json'].get('usage', {})\n\ncomp_tokens = usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0)\nbudget = _items[0]['json'].get('tokenBudget', {'limit': 10000, 'consumed': 0, 'calls': []})\nbudget['consumed'] = budget.get('consumed', 0) + comp_tokens\nbudget['calls']    = budget.get('calls', []) + [{'step': 'rolling_summary', 'tokens': comp_tokens}]\n\nreturn [{'json': {\n    'originalQuery':    _items[0]['json'].get('originalQuery', ''),\n    'maxSubQueries':    _items[0]['json'].get('maxSubQueries', 4),\n    'subQueries':       _items[0]['json'].get('subQueries', []),\n    'episodes':         _items[0]['json'].get('episodes', []),\n    'rollingSummary':   compressed,\n    'needsCompression': False,\n    'tokenBudget':      budget\n}}]\n"
+      },
+      "id": "apply-rolling-summary-new",
+      "name": "Apply Rolling Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3210,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "pr-1",
+              "name": "originalQuery",
+              "value": "={{ $json.originalQuery }}",
+              "type": "string"
+            },
+            {
+              "id": "pr-2",
+              "name": "maxSubQueries",
+              "value": "={{ $json.maxSubQueries }}",
+              "type": "number"
+            },
+            {
+              "id": "pr-3",
+              "name": "subQueries",
+              "value": "={{ $json.subQueries }}",
+              "type": "array"
+            },
+            {
+              "id": "pr-4",
+              "name": "episodes",
+              "value": "={{ $json.episodes }}",
+              "type": "array"
+            },
+            {
+              "id": "pr-5",
+              "name": "sources",
+              "value": "={{ $json.sources }}",
+              "type": "array"
+            },
+            {
+              "id": "pr-6",
+              "name": "tokenBudget",
+              "value": "={{ $json.tokenBudget }}",
+              "type": "object"
+            },
+            {
+              "id": "pr-7",
+              "name": "rollingSummary",
+              "value": "={{ $json.rollingSummary }}",
+              "type": "string"
+            },
+            {
+              "id": "pr-8",
+              "name": "needsCompression",
+              "value": "={{ $json.needsCompression }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {
+          "includeOtherFields": true
+        }
+      },
+      "id": "preserve-state-rolling-v2",
+      "name": "Preserve State for Rolling",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2544,
+        1232
       ]
     }
   ],
@@ -744,12 +901,7 @@
       "main": [
         [
           {
-            "node": "Merge Synthesis with State",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Synthesize Answer",
+            "node": "Need Rolling Summary?",
             "type": "main",
             "index": 0
           }
@@ -783,6 +935,67 @@
         [
           {
             "node": "Store Episode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Need Rolling Summary?": {
+      "main": [
+        [
+          {
+            "node": "Preserve State for Rolling",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Synthesize Answer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Synthesis with State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Rolling Summary": {
+      "main": [
+        [
+          {
+            "node": "Apply Rolling Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Rolling Summary": {
+      "main": [
+        [
+          {
+            "node": "Synthesize Answer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Synthesis with State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preserve State for Rolling": {
+      "main": [
+        [
+          {
+            "node": "Build Rolling Summary",
             "type": "main",
             "index": 0
           }
